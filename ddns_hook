@@ -1,5 +1,14 @@
 #!/usr/bin/ash
 
+url_encode() {
+	jq --null-input --raw-output --arg value "$1" '$value | @uri'
+}
+
+update() {
+	[ "$(curl --silent "$1")" = "KO" ] && echo "Failed to update."
+	sent_update=1
+}
+
 run_hook ()
 {
     if [ -n "$nameserver" ]; then
@@ -8,12 +17,66 @@ run_hook ()
 	#Default to Google nameservers
 	echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 	echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+	# https://serverfault.com/questions/858649/slow-responses-with-curl-and-wget-on-centos-7
+	echo "options single-request-reopen" >> /etc/resolv.conf
     fi
-    echo "Starting inadyn-mt"
-    inadyn-mt
+    echo "Attempting to update addresses in DuckDns"
+
+	for configuration_file in /etc/duckdns.d/*; do
+        echo "found config file $configuration_file"
+		unset -v DOMAINS TOKEN IPV4_ADDRESS IPV4_URL IPV4_AUTO IPV6_ADDRESS IPV6_URL
+
+		sent_update=0
+		# shellcheck source=duckdns.conf
+		. "$configuration_file"
+
+		echo "DOMAINS $DOMAINS TOKEN $TOKEN"
+		[ -z "$DOMAINS" ] && echo "DOMAINS is required." && continue
+		[ -z "$TOKEN" ] && echo "TOKEN is required." && continue
+
+		echo "Getting addresses..."
+		# ipv4_debug=$(curl -v "$IPV4_URL")
+		# ipv6_debug=$(curl -s -L --ipv6 "$IPV6_URL")
+		# echo $ipv4_debug
+		# echo $ipv6_debug
+		ipv4=""
+		ipv6=""
+		ntries=0
+		while [ -z "$ipv6" ]; do
+			echo "Waiting for addresses..."
+			sleep 5
+			ipv6=$(curl --silent "$IPV6_URL")
+			ntries=$((ntries+1))
+			if [ "$ntries" -gt 10 ]; then
+				echo "Failed to get addresses."
+				break
+			fi
+
+		done
+
+		ipv4=$(curl --silent "$IPV4_URL")
+		ipv6=$(curl --silent "$IPV6_URL")
+
+		echo "ipv4 address: $ipv4"
+		echo "ipv6 address: $ipv6"
+
+		echo "Updating addresses..."
+		initial_update_url="https://www.duckdns.org/update?domains=$(url_encode "$DOMAINS")&token=$(url_encode "$TOKEN")"
+		echo "$initial_update_url"
+		update_url="$initial_update_url"
+		[ -z "$ipv4" ] && [ "$IPV4_AUTO" = 1 ] && update "${update_url}&ip=${ipv4}"
+		[ -n "$ipv4" ] && update_url="${update_url}&ip=${ipv4}"
+		[ -n "$ipv6" ] && update_url="${update_url}&ipv6=${ipv6}"
+		[ "$update_url" != "$initial_update_url" ] && update "$update_url"
+		[ "$sent_update" = 0 ] && echo "There is no IPv4 or IPv6 address to update."
+
+	done
+	unset -v configuration_name
+
+	echo "Done updating addresses."
 }
 
 run_cleanuphook ()
 {
-    killall inadyn-mt
+	true
 }
